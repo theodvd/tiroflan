@@ -43,6 +43,8 @@ final class Store: ObservableObject {
     /// Absence détectée pendant le chrono, en attente de décision (retirer ou garder).
     @Published private(set) var idleAway: TimeInterval?
     @Published private(set) var armedEventIDs: Set<String> = []
+    /// Proposition d'allonger un créneau planifié, après une séance plus courte que prévu.
+    @Published private(set) var extensionProposal: ExtensionProposal?
 
     let calendar: CalendarService
     var notifier: Notifier?
@@ -59,6 +61,10 @@ final class Store: ObservableObject {
     private var longRunNotified = false
     private var notifiedEventIDs: Set<String> = []
     private var tickCount = 0
+    /// Séances enregistrées avant la fin du résumé : il leur sera appliqué à son arrivée.
+    private var applyWhenReady: Set<UUID> = []
+    /// Séances dont le résumé est en cours de rédaction en arrière-plan (ajout manuel).
+    private var autoSummarizing: Set<UUID> = []
 
     init(calendar: CalendarService) {
         self.calendar = calendar
@@ -223,9 +229,11 @@ final class Store: ObservableObject {
             s.calendarEventID = calendar.createEvent(title: eventTitle(s, c), start: s.start, end: s.end,
                                                      notes: eventNotes(s), calendarID: calID)
         }
+        let planned = replacePlannedSlots(for: s)
         data.sessions.append(s)
         commit()
         beginReview(s.id)
+        proposeExtension(for: s.clientID, shortfall: planned - s.duration)
     }
 
     func startFromEvent(_ eventID: String) {
@@ -362,14 +370,16 @@ final class Store: ObservableObject {
         guard let s = session(id), let c = client(s.clientID) else { return }
         draft?.loading = true
         draft?.error = nil
-        let previous = data.objectives
-            .filter { $0.clientID == c.id && $0.status != .termine }
-            .map { PreviousObjective(title: $0.title, status: $0.status, streak: $0.blockedStreak) }
+        let previous = previousObjectives(for: c.id)
         let claudePath = data.settings.claudePath
         Task {
             let result = await summarizer.summarize(start: s.start, end: s.end, clientName: c.name,
                                                     previous: previous, claudePath: claudePath)
-            guard draft?.sessionID == id else { return }
+            guard draft?.sessionID == id else {
+                // Séance enregistrée pendant que Claude rédigeait : le résumé n'est pas perdu.
+                if applyWhenReady.remove(id) != nil, case .success(let r) = result { applySummary(r, to: id) }
+                return
+            }
             switch result {
             case .success(let r):
                 draft?.title = r.title
@@ -382,6 +392,44 @@ final class Store: ObservableObject {
             }
             draft?.loading = false
         }
+    }
+
+    /// Objectifs encore ouverts d'un client, transmis à Claude pour garder les mêmes titres.
+    private func previousObjectives(for clientID: UUID) -> [PreviousObjective] {
+        data.objectives
+            .filter { $0.clientID == clientID && $0.status != .termine }
+            .map { PreviousObjective(title: $0.title, status: $0.status, streak: $0.blockedStreak) }
+    }
+
+    /// Résumé d'une séance passée rédigé en arrière-plan, sans écran de validation (séance ajoutée à la main).
+    /// Sans conversation Claude Code sur le créneau, la séance reste telle quelle.
+    private func autoSummarize(_ id: UUID) {
+        guard let s = session(id), let c = client(s.clientID), !s.imported, s.note.isEmpty, s.end <= Date(),
+              !autoSummarizing.contains(id) else { return }
+        autoSummarizing.insert(id)
+        let previous = previousObjectives(for: c.id)
+        let claudePath = data.settings.claudePath
+        Task {
+            let result = await summarizer.summarize(start: s.start, end: s.end, clientName: c.name,
+                                                    previous: previous, claudePath: claudePath)
+            autoSummarizing.remove(id)
+            if case .success(let r) = result { applySummary(r, to: id) }
+        }
+    }
+
+    /// Écrit un résumé dans une séance déjà enregistrée, sans écraser ce que Théo a écrit lui-même.
+    private func applySummary(_ r: SummaryResult, to id: UUID) {
+        guard let i = data.sessions.firstIndex(where: { $0.id == id }), !data.sessions[i].imported,
+              data.sessions[i].note.isEmpty, !r.text.isEmpty else { return }
+        var s = data.sessions[i]
+        if s.title.isEmpty { s.title = r.title }
+        s.note = r.text
+        s.objectives = r.objectives
+        s.claudeSessionCount = r.sourceCount
+        for o in r.objectives { updateRecord(o, clientID: s.clientID, at: s.end) }
+        syncCalendar(&s, wanted: s.calendarEventID != nil)
+        data.sessions[i] = s
+        commit()
     }
 
     var draftTitle: String {
@@ -424,6 +472,7 @@ final class Store: ObservableObject {
             for o in d.objectives { updateRecord(o, clientID: s.clientID, at: s.end) }
         }
         s.reviewed = true
+        if keepNote && d.loading { applyWhenReady.insert(s.id) }
         syncCalendar(&s, wanted: d.addToCalendar)
         data.sessions[index] = s
         draft = nil
@@ -439,6 +488,7 @@ final class Store: ObservableObject {
         if let i = data.objectives.firstIndex(where: {
             $0.clientID == clientID && $0.title.localizedCaseInsensitiveCompare(o.title) == .orderedSame
         }) {
+            guard data.objectives[i].lastSeen <= date else { return }
             data.objectives[i].status = o.status
             data.objectives[i].detail = o.detail
             data.objectives[i].blockedStreak = o.status == .bloque ? data.objectives[i].blockedStreak + 1 : 0
@@ -633,6 +683,7 @@ final class Store: ObservableObject {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if let id, let i = data.sessions.firstIndex(where: { $0.id == id }) {
             var s = data.sessions[i]
+            let moved = s.start != start || s.end != end
             s.clientID = clientID
             s.start = start
             s.end = end
@@ -641,12 +692,18 @@ final class Store: ObservableObject {
             s.reviewed = true
             syncCalendar(&s, wanted: s.calendarEventID != nil)
             data.sessions[i] = s
+            commit()
+            // Horaires corrigés et toujours pas de note : on retente le résumé sur le nouveau créneau.
+            if moved && trimmed.isEmpty { autoSummarize(s.id) }
         } else {
             var s = Session(clientID: clientID, start: start, end: end, title: cleanTitle, note: trimmed, reviewed: true)
             syncCalendar(&s, wanted: data.settings.writeToCalendar)
+            let planned = replacePlannedSlots(for: s)
             data.sessions.append(s)
+            commit()
+            if trimmed.isEmpty { autoSummarize(s.id) }
+            proposeExtension(for: s.clientID, shortfall: planned - s.duration)
         }
-        commit()
     }
 
     func deleteSession(_ id: UUID) {
@@ -654,6 +711,76 @@ final class Store: ObservableObject {
         if let eventID = data.sessions[i].calendarEventID { calendar.deleteEvent(id: eventID) }
         data.sessions.remove(at: i)
         commit()
+    }
+
+    // MARK: - Créneaux planifiés et objectif de la semaine
+
+    /// La séance réelle remplace les créneaux planifiés qu'elle chevauche (agenda du client, titre au nom
+    /// du client, sans invités). Renvoie leur durée totale, pour savoir si la séance a été plus courte.
+    /// Rien n'est supprimé si la séance n'est pas elle-même dans l'agenda.
+    @discardableResult
+    private func replacePlannedSlots(for s: Session) -> TimeInterval {
+        guard s.calendarEventID != nil, let c = client(s.clientID), let calID = calendarID(for: s.clientID) else { return 0 }
+        let slots = calendar.plannedSlots(calendarID: calID, clientName: c.name, from: s.start, to: s.end)
+        for slot in slots { calendar.deleteEvent(id: slot.id) }
+        return slots.reduce(0) { $0 + $1.end.timeIntervalSince($1.start) }
+    }
+
+    /// Créneaux planifiés d'un client qui restent dans la semaine après `date`.
+    private func upcomingSlots(for clientID: UUID, in week: DateInterval, after date: Date) -> [PlannedSlot] {
+        guard let c = client(clientID), let calID = calendarID(for: clientID), date < week.end else { return [] }
+        return calendar.plannedSlots(calendarID: calID, clientName: c.name, from: max(date, week.start), to: week.end)
+    }
+
+    /// Décompte de la semaine : fait, planifié (partie à venir), objectif. nil si le client n'a pas d'objectif.
+    func weekBalance(for clientID: UUID, at date: Date) -> WeekBalance? {
+        guard let hours = client(clientID)?.weeklyHours, hours > 0,
+              let week = Calendar.fr.dateInterval(of: .weekOfYear, for: date) else { return nil }
+        var done = data.sessions.filter { $0.clientID == clientID && week.contains($0.start) }.reduce(0) { $0 + $1.duration }
+        if let r = data.running, r.clientID == clientID, week.contains(r.start) { done += elapsedRunning(at: date) }
+        let planned = upcomingSlots(for: clientID, in: week, after: date)
+            .reduce(0) { $0 + $1.end.timeIntervalSince(max($1.start, date)) }
+        return WeekBalance(target: hours * 3600, done: done, planned: planned)
+    }
+
+    /// Séance plus courte que le créneau prévu : propose d'allonger le prochain créneau planifié de la semaine
+    /// qui peut l'être sans chevaucher aucun événement. Le manque est plafonné par ce qu'il reste à caser
+    /// dans la semaine (objectif − fait − planifié), pour ne rien proposer si la semaine est déjà couverte.
+    private func proposeExtension(for clientID: UUID, shortfall: TimeInterval) {
+        let now = Date()
+        var missing = shortfall
+        if let balance = weekBalance(for: clientID, at: now) { missing = min(missing, balance.missing) }
+        guard missing >= 15 * 60, let c = client(clientID), let week = Calendar.fr.dateInterval(of: .weekOfYear, for: now) else { return }
+        missing = (missing / 300).rounded(.up) * 300  // arrondi aux 5 minutes supérieures
+
+        for slot in upcomingSlots(for: clientID, in: week, after: now) where slot.start > now {
+            let newEnd = slot.end.addingTimeInterval(missing)
+            guard Calendar.fr.isDate(newEnd.addingTimeInterval(-1), inSameDayAs: slot.start),
+                  calendar.isFree(from: slot.end, to: newEnd, excluding: slot.id) else { continue }
+            extensionProposal = ExtensionProposal(clientID: clientID, slot: slot, newEnd: newEnd, missing: missing)
+            notifier?.post(id: "extend", title: "Il te manque \(Fmt.words(missing)) pour \(c.name) cette semaine",
+                           body: "Allonger « \(slot.title) » \(Fmt.dayShort(slot.start)) jusqu'à \(Fmt.time(newEnd)) ?",
+                           category: Notifier.extendCategory)
+            onChange?()
+            return
+        }
+        notifier?.post(id: "extend", title: "Il te manque \(Fmt.words(missing)) pour \(c.name) cette semaine",
+                       body: "Aucun créneau planifié de la semaine ne peut être allongé sans chevauchement.")
+    }
+
+    func acceptExtension() {
+        guard let p = extensionProposal else { return }
+        extensionProposal = nil
+        if !calendar.setEnd(id: p.slot.id, to: p.newEnd) {
+            notifier?.post(id: "extend", title: "Allongement impossible", body: "Le créneau a été déplacé ou supprimé entre-temps.")
+        }
+        calendar.reload()
+        onChange?()
+    }
+
+    func dismissExtension() {
+        extensionProposal = nil
+        onChange?()
     }
 
     // MARK: - Clients et réglages
@@ -668,6 +795,13 @@ final class Store: ObservableObject {
         guard let i = data.clients.firstIndex(where: { $0.id == id }) else { return }
         if let name { data.clients[i].name = name }
         if let domain { data.clients[i].emailDomain = domain.trimmingCharacters(in: .whitespaces).lowercased() }
+        commit()
+    }
+
+    /// Objectif d'heures par semaine ; 0 ou moins le retire.
+    func setWeeklyHours(_ id: UUID, _ hours: Double) {
+        guard let i = data.clients.firstIndex(where: { $0.id == id }) else { return }
+        data.clients[i].weeklyHours = hours > 0 ? min(60, hours) : nil
         commit()
     }
 

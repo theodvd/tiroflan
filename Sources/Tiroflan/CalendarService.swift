@@ -183,4 +183,54 @@ final class CalendarService: ObservableObject {
         guard authorized, let event = store.event(withIdentifier: id) else { return }
         try? store.remove(event, span: .thisEvent, commit: true)
     }
+
+    // MARK: - Créneaux planifiés
+
+    /// Créneaux de travail planifiés pour un client dans cet agenda, qui touchent la période.
+    /// Un créneau planifié : titre qui commence par le nom du client (« tamtam », « Tamtam 1st day »),
+    /// sans aucun invité, pas écrit par Tiroflan. Un vrai rendez-vous (avec invités) n'en est jamais un.
+    func plannedSlots(calendarID: String, clientName: String, from start: Date, to end: Date) -> [PlannedSlot] {
+        let name = clientName.trimmingCharacters(in: .whitespaces)
+        guard authorized, !name.isEmpty, let cal = store.calendar(withIdentifier: calendarID) else { return [] }
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: [cal])
+        return store.events(matching: predicate)
+            .filter { e in
+                let title = (e.title ?? "").trimmingCharacters(in: .whitespaces)
+                return !e.isAllDay
+                    && (e.attendees ?? []).isEmpty
+                    && !(e.notes?.contains(Self.marker) ?? false)
+                    && title.range(of: name, options: [.caseInsensitive, .diacriticInsensitive, .anchored]) != nil
+                    && e.endDate > start && e.startDate < end
+            }
+            .compactMap { e in
+                e.eventIdentifier.map { PlannedSlot(id: $0, title: e.title ?? "", start: e.startDate, end: e.endDate) }
+            }
+            .sorted { $0.start < $1.start }
+    }
+
+    /// Vrai si aucun événement (tous agendas lisibles, agenda perso partagé compris) n'occupe la période,
+    /// hors événements à la journée et hors l'événement `excluding` (le créneau qu'on allonge).
+    func isFree(from start: Date, to end: Date, excluding: String?) -> Bool {
+        guard authorized, end > start else { return false }
+        let readable = store.calendars(for: .event).filter { $0.type != .birthday && $0.type != .subscription }
+        guard !readable.isEmpty else { return true }
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: readable)
+        return !store.events(matching: predicate).contains { e in
+            !e.isAllDay && e.eventIdentifier != excluding && e.endDate > start && e.startDate < end
+                && e.availability != .free
+        }
+    }
+
+    /// Repousse la fin d'un événement ; renvoie faux s'il n'existe plus ou n'a pas pu être enregistré.
+    func setEnd(id: String, to end: Date) -> Bool {
+        guard authorized, let event = store.event(withIdentifier: id), end > event.startDate else { return false }
+        event.endDate = end
+        do {
+            try store.save(event, span: .thisEvent, commit: true)
+            return true
+        } catch {
+            NSLog("Tiroflan : allongement impossible, \(error)")
+            return false
+        }
+    }
 }
