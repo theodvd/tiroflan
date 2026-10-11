@@ -1,0 +1,5 @@
+# Compilation (régénérée par ./build.sh)
+.build/
+build/
+# macOS
+.DS_Store
