@@ -53,6 +53,13 @@ struct SettingsView: View {
                         .textFieldStyle(.plain)
                         .font(.mono(11))
                         .foregroundStyle(Theme.muted)
+                    HStack(spacing: 8) {
+                        Text("Heures par semaine").font(.geist(12)).foregroundStyle(Theme.muted)
+                        Spacer()
+                        IconCircleButton(symbol: "minus", label: "Moins") { store.setWeeklyHours(c.id, (c.weeklyHours ?? 0) - 1) }
+                        Text(c.weeklyHours.map { "\(Int($0)) h" } ?? "aucun").font(.mono(12)).foregroundStyle(Theme.ink).frame(width: 52)
+                        IconCircleButton(symbol: "plus", label: "Plus") { store.setWeeklyHours(c.id, (c.weeklyHours ?? 0) + 1) }
+                    }
                     if calendar.authorized {
                         HStack {
                             Text("Agenda").font(.geist(12)).foregroundStyle(Theme.muted)

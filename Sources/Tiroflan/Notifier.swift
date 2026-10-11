@@ -7,6 +7,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let eventCategory = "EVENT_START"
     static let idleCategory = "IDLE"
     static let longRunCategory = "LONG_RUN"
+    static let extendCategory = "EXTEND"
 
     weak var store: Store?
 
@@ -17,10 +18,12 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let remove = UNNotificationAction(identifier: "REMOVE_IDLE", title: "Retirer ce temps", options: [])
         let keep = UNNotificationAction(identifier: "KEEP_IDLE", title: "Garder", options: [])
         let stop = UNNotificationAction(identifier: "STOP", title: "Arrêter", options: [])
+        let extend = UNNotificationAction(identifier: "EXTEND", title: "Allonger", options: [])
         center.setNotificationCategories([
             UNNotificationCategory(identifier: Self.eventCategory, actions: [start], intentIdentifiers: []),
             UNNotificationCategory(identifier: Self.idleCategory, actions: [remove, keep], intentIdentifiers: []),
             UNNotificationCategory(identifier: Self.longRunCategory, actions: [stop], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Self.extendCategory, actions: [extend], intentIdentifiers: []),
         ])
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
@@ -61,6 +64,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             store.keepIdle()
         case "STOP":
             store.stop()
+        case "EXTEND":
+            store.acceptExtension()
         default:
             store.onRequestPanel?()
         }

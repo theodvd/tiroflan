@@ -11,6 +11,7 @@ struct MainView: View {
             banners
             TimerBlock(store: store)
             TotalsRow(store: store)
+            WeekLine(store: store)
             agenda
             activity
             footer
@@ -58,6 +59,24 @@ struct MainView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+        }
+        if let p = store.extensionProposal {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Il te manque \(Fmt.words(p.missing)) pour \(store.client(p.clientID)?.name ?? "") cette semaine.")
+                    .font(.geist(13, .medium))
+                    .foregroundStyle(Theme.ink)
+                Text("Allonger « \(p.slot.title) » \(Fmt.dayShort(p.slot.start)), \(Fmt.time(p.slot.start)) → \(Fmt.time(p.newEnd)) ?")
+                    .font(.geist(12))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Allonger") { store.acceptExtension() }.buttonStyle(CapsuleStyle(kind: .ink, height: 30))
+                    Button("Non") { store.dismissExtension() }.buttonStyle(CapsuleStyle(kind: .outline, height: 30))
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fieldBox()
         }
         if let away = store.idleAway {
             VStack(alignment: .leading, spacing: 10) {
@@ -226,6 +245,29 @@ struct TotalsRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .leading) {
             if divider { Rectangle().fill(Theme.hairline).frame(width: 1) }
+        }
+    }
+}
+
+/// Décompte de la semaine du client sélectionné, s'il a un objectif d'heures.
+struct WeekLine: View {
+    @ObservedObject var store: Store
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { ctx in
+            if let b = store.weekBalance(for: store.currentClientID, at: ctx.date) {
+                HStack(spacing: 6) {
+                    Text("\(store.currentClientName) · \(Fmt.words(b.done)) / \(Fmt.words(b.target))")
+                        .foregroundStyle(Theme.ink)
+                    Text("· \(Fmt.words(b.planned)) planifiées").foregroundStyle(Theme.muted)
+                    Spacer(minLength: 4)
+                    Text(b.missing >= 60 ? "\(Fmt.words(b.missing)) à caser" : "semaine couverte")
+                        .foregroundStyle(b.missing >= 60 ? Theme.accent : Theme.muted)
+                }
+                .font(.geist(12))
+                .lineLimit(1)
+                .padding(.top, -8)
+            }
         }
     }
 }

@@ -17,12 +17,15 @@ struct Client: Codable, Identifiable, Hashable {
     var emailDomain: String
     /// Agenda où écrire ses séances (sa couleur fait le code couleur) ; nil = automatique.
     var calendarID: String?
+    /// Heures à faire par semaine (ex. 21 pour Tamtam) ; nil = pas d'objectif, pas de décompte.
+    var weeklyHours: Double?
 
-    init(id: UUID = UUID(), name: String, emailDomain: String = "", calendarID: String? = nil) {
+    init(id: UUID = UUID(), name: String, emailDomain: String = "", calendarID: String? = nil, weeklyHours: Double? = nil) {
         self.id = id
         self.name = name
         self.emailDomain = emailDomain
         self.calendarID = calendarID
+        self.weeklyHours = weeklyHours
     }
 
     init(from decoder: Decoder) throws {
@@ -31,6 +34,7 @@ struct Client: Codable, Identifiable, Hashable {
         name = try c.decode(String.self, forKey: .name)
         emailDomain = try c.decodeIfPresent(String.self, forKey: .emailDomain) ?? ""
         calendarID = try c.decodeIfPresent(String.self, forKey: .calendarID)
+        weeklyHours = try c.decodeIfPresent(Double.self, forKey: .weeklyHours)
     }
 }
 
@@ -228,4 +232,32 @@ struct AgendaItem: Identifiable, Equatable {
     let end: Date
     /// Domaines e-mail des participants, pour deviner le client.
     let domains: [String]
+}
+
+/// Créneau de travail planifié dans l'agenda (ex. « tamtam » de 14:00 à 16:00), pas encore une séance.
+struct PlannedSlot: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let start: Date
+    let end: Date
+}
+
+/// Décompte de la semaine pour un client qui a un objectif d'heures.
+struct WeekBalance: Equatable {
+    let target: TimeInterval
+    /// Séances de la semaine, chrono en cours compris.
+    let done: TimeInterval
+    /// Créneaux planifiés restants (la partie à venir seulement).
+    let planned: TimeInterval
+
+    /// Temps qui n'est ni fait ni planifié.
+    var missing: TimeInterval { max(0, target - done - planned) }
+}
+
+/// Proposition d'allonger un créneau planifié pour tenir l'objectif de la semaine.
+struct ExtensionProposal: Equatable {
+    let clientID: UUID
+    let slot: PlannedSlot
+    let newEnd: Date
+    let missing: TimeInterval
 }
