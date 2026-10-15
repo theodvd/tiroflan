@@ -252,6 +252,9 @@ struct WeekBalance: Equatable {
 
     /// Temps qui n'est ni fait ni planifié.
     var missing: TimeInterval { max(0, target - done - planned) }
+
+    /// Écart entre fait + planifié et l'objectif : positif = planifié en trop, négatif = reste à caser.
+    var gap: TimeInterval { done + planned - target }
 }
 
 /// Proposition d'allonger un créneau planifié pour tenir l'objectif de la semaine.

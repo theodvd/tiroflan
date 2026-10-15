@@ -261,8 +261,10 @@ struct WeekLine: View {
                         .foregroundStyle(Theme.ink)
                     Text("· \(Fmt.words(b.planned)) planifiées").foregroundStyle(Theme.muted)
                     Spacer(minLength: 4)
-                    Text(b.missing >= 60 ? "\(Fmt.words(b.missing)) à caser" : "semaine couverte")
-                        .foregroundStyle(b.missing >= 60 ? Theme.accent : Theme.muted)
+                    // Écart signé : « +x en trop » si on a planifié plus que l'objectif, « -y à caser » sinon.
+                    Text(b.gap >= 60 ? "+\(Fmt.words(b.gap)) en trop"
+                         : b.gap <= -60 ? "-\(Fmt.words(-b.gap)) à caser" : "semaine pile")
+                        .foregroundStyle(b.gap <= -60 ? Theme.accent : Theme.muted)
                 }
                 .font(.geist(12))
                 .lineLimit(1)
