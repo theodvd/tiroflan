@@ -221,6 +221,20 @@ final class CalendarService: ObservableObject {
         }
     }
 
+    /// Avance le début d'un événement (la suite d'un créneau après une séance) ; renvoie faux s'il n'existe plus
+    /// ou n'a pas pu être enregistré.
+    func setStart(id: String, to start: Date) -> Bool {
+        guard authorized, let event = store.event(withIdentifier: id), start < event.endDate else { return false }
+        event.startDate = start
+        do {
+            try store.save(event, span: .thisEvent, commit: true)
+            return true
+        } catch {
+            NSLog("Tiroflan : raccourcissement impossible, \(error)")
+            return false
+        }
+    }
+
     /// Repousse la fin d'un événement ; renvoie faux s'il n'existe plus ou n'a pas pu être enregistré.
     func setEnd(id: String, to end: Date) -> Bool {
         guard authorized, let event = store.event(withIdentifier: id), end > event.startDate else { return false }

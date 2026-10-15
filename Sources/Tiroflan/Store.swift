@@ -715,15 +715,26 @@ final class Store: ObservableObject {
 
     // MARK: - Créneaux planifiés et objectif de la semaine
 
-    /// La séance réelle remplace les créneaux planifiés qu'elle chevauche (agenda du client, titre au nom
-    /// du client, sans invités). Renvoie leur durée totale, pour savoir si la séance a été plus courte.
-    /// Rien n'est supprimé si la séance n'est pas elle-même dans l'agenda.
+    /// La séance réelle remplace la partie des créneaux planifiés qu'elle chevauche (agenda du client, titre
+    /// au nom du client, sans invités) : tout ce qui précède la fin de la séance est retiré, la suite du
+    /// créneau reste planifiée (ex. séance 08:00-08:30 dans un créneau 08:00-12:00 : il reste 08:30-12:00).
+    /// Renvoie la durée planifiée jusqu'à la fin de la séance, pour savoir si la séance a été plus courte.
+    /// Rien n'est touché si la séance n'est pas elle-même dans l'agenda.
     @discardableResult
     private func replacePlannedSlots(for s: Session) -> TimeInterval {
         guard s.calendarEventID != nil, let c = client(s.clientID), let calID = calendarID(for: s.clientID) else { return 0 }
         let slots = calendar.plannedSlots(calendarID: calID, clientName: c.name, from: s.start, to: s.end)
-        for slot in slots { calendar.deleteEvent(id: slot.id) }
-        return slots.reduce(0) { $0 + $1.end.timeIntervalSince($1.start) }
+        var due: TimeInterval = 0
+        for slot in slots {
+            due += min(slot.end, s.end).timeIntervalSince(slot.start)
+            // Suite d'au moins 15 min : on la garde. En dessous, on retire tout pour ne pas laisser de miettes.
+            if slot.end.timeIntervalSince(s.end) >= 15 * 60 {
+                _ = calendar.setStart(id: slot.id, to: s.end)
+            } else {
+                calendar.deleteEvent(id: slot.id)
+            }
+        }
+        return due
     }
 
     /// Créneaux planifiés d'un client qui restent dans la semaine après `date`.
