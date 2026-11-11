@@ -11,7 +11,7 @@ struct MainView: View {
             banners
             TimerBlock(store: store)
             TotalsRow(store: store)
-            WeekLine(store: store)
+            WeekLine(store: store, calendar: calendar)
             agenda
             activity
             footer
@@ -36,6 +36,10 @@ struct MainView: View {
                     .frame(height: 30)
             }
             Spacer(minLength: 8)
+            IconCircleButton(symbol: calendar.syncing ? "hourglass" : "arrow.clockwise",
+                             label: calendar.syncing ? "Synchronisation avec Google…" : "Resynchroniser l'agenda Google") {
+                calendar.resync()
+            }
             IconCircleButton(symbol: "slider.horizontal.3", label: "Réglages") { store.route = .settings }
         }
     }
@@ -252,6 +256,8 @@ struct TotalsRow: View {
 /// Décompte de la semaine du client sélectionné, s'il a un objectif d'heures.
 struct WeekLine: View {
     @ObservedObject var store: Store
+    /// Observé pour recalculer dès que l'agenda change (resynchro, créneau supprimé dans Google).
+    @ObservedObject var calendar: CalendarService
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { ctx in

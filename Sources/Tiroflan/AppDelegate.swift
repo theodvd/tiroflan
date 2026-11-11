@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var store = Store(calendar: calendar)
     private let notifier = Notifier()
     private var ticker: Timer?
+    private var calendarRefresher: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Fonts.register()
@@ -37,6 +38,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.store.tick() }
         }
         ticker?.tolerance = 3
+
+        // Toutes les 5 minutes : demande légère à macOS de rafraîchir Google, pour que les créneaux
+        // supprimés dans Google Agenda ne restent pas comptés.
+        calendarRefresher = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.calendar.refreshSources() }
+        }
+        calendarRefresher?.tolerance = 30
 
         // Retour de veille : le battement suivant mesure l'écart et propose de retirer ce temps.
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -90,11 +98,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePanel() {
         guard let button = statusItem.button else { return }
+        if !panel.isShown { calendar.refreshSources() }
         panel.toggle(below: button)
     }
 
     private func openPanel() {
         guard let button = statusItem.button, !panel.isShown else { return }
+        calendar.refreshSources()
         panel.show(below: button)
     }
 
