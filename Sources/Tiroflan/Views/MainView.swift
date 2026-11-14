@@ -84,9 +84,13 @@ struct MainView: View {
         }
         if let away = store.idleAway {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Absent \(Fmt.words(away)) pendant la séance.")
+                Text("Absent \(Fmt.words(away)) pendant la séance\(store.absenceRange.map { " (\($0))" } ?? "").")
                     .font(.geist(13, .medium))
                     .foregroundStyle(Theme.ink)
+                Text("Retirer coupe la séance à cet endroit, dans l'agenda aussi.")
+                    .font(.geist(12))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Retirer ce temps") { store.removeIdle() }.buttonStyle(CapsuleStyle(kind: .ink, height: 30))
                     Button("Garder") { store.keepIdle() }.buttonStyle(CapsuleStyle(kind: .outline, height: 30))

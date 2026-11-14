@@ -202,6 +202,33 @@ final class CalendarService: ObservableObject {
         store.event(withIdentifier: id) != nil
     }
 
+    /// Événement d'une séance lu par son identifiant, où qu'il soit et même si son repère a été effacé.
+    /// nil s'il n'existe plus (ou si l'agenda n'est pas autorisé : à vérifier avant de conclure).
+    func loggedEvent(id: String) -> LoggedEvent? {
+        guard authorized, let e = store.event(withIdentifier: id) else { return nil }
+        return LoggedEvent(id: id, calendarID: e.calendar.calendarIdentifier, title: e.title ?? "",
+                           notes: e.notes ?? "", start: e.startDate, end: e.endDate)
+    }
+
+    /// Vrai si l'agenda est branché et lisible (compte Google présent dans Calendrier).
+    func calendarExists(id: String) -> Bool {
+        authorized && store.calendar(withIdentifier: id) != nil
+    }
+
+    /// Remplace la description d'un événement ; renvoie faux s'il n'existe plus ou n'a pas pu être enregistré.
+    @discardableResult
+    func setNotes(id: String, notes: String) -> Bool {
+        guard authorized, let event = store.event(withIdentifier: id) else { return false }
+        event.notes = notes
+        do {
+            try store.save(event, span: .thisEvent, commit: true)
+            return true
+        } catch {
+            NSLog("Tiroflan : description impossible à mettre à jour, \(error)")
+            return false
+        }
+    }
+
     /// Crée l'événement d'une séance ; renvoie son identifiant.
     func createEvent(title: String, start: Date, end: Date, notes: String, calendarID: String) -> String? {
         guard authorized, let calendar = store.calendar(withIdentifier: calendarID) else { return nil }
@@ -285,7 +312,9 @@ final class CalendarService: ObservableObject {
         }
     }
 
-    /// Repousse la fin d'un événement ; renvoie faux s'il n'existe plus ou n'a pas pu être enregistré.
+    /// Déplace la fin d'un événement (plus tard ou plus tôt) ; renvoie faux s'il n'existe plus
+    /// ou n'a pas pu être enregistré.
+    @discardableResult
     func setEnd(id: String, to end: Date) -> Bool {
         guard authorized, let event = store.event(withIdentifier: id), end > event.startDate else { return false }
         event.endDate = end

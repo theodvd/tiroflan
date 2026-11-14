@@ -40,8 +40,9 @@ final class Store: ObservableObject {
     @Published private(set) var data: AppData
     @Published var route: Route = .main
     @Published var draft: ReviewDraft?
-    /// Absence détectée pendant le chrono, en attente de décision (retirer ou garder).
-    @Published private(set) var idleAway: TimeInterval?
+    /// Absences détectées pendant le chrono (début et fin exacts, triées), en attente de décision :
+    /// retirer (la séance est coupée à ces endroits) ou garder.
+    @Published private(set) var absences: [DateInterval] = []
     @Published private(set) var armedEventIDs: Set<String> = []
     /// Proposition d'allonger un créneau planifié, après une séance plus courte que prévu.
     @Published private(set) var extensionProposal: ExtensionProposal?
@@ -65,6 +66,10 @@ final class Store: ObservableObject {
     private var applyWhenReady: Set<UUID> = []
     /// Séances dont le résumé est en cours de rédaction en arrière-plan (ajout manuel).
     private var autoSummarizing: Set<UUID> = []
+    /// Séances de ce Mac dont l'événement est introuvable, avec le nombre de relectures d'affilée.
+    private var missingPasses: [UUID: Int] = [:]
+    /// Alerte « séances introuvables » déjà envoyée pour la panne en cours.
+    private var missingAlerted = false
 
     init(calendar: CalendarService) {
         self.calendar = calendar
@@ -100,6 +105,17 @@ final class Store: ObservableObject {
 
     var pendingReviews: [Session] {
         data.sessions.filter { !$0.reviewed }.sorted { $0.end > $1.end }
+    }
+
+    /// Durée totale des absences en attente de décision ; nil s'il n'y en a pas.
+    var idleAway: TimeInterval? {
+        absences.isEmpty ? nil : absences.reduce(0) { $0 + $1.duration }
+    }
+
+    /// Horaires de l'absence en attente (« 21:04 → 08:50 ») quand il n'y en a qu'une.
+    var absenceRange: String? {
+        guard absences.count == 1, let a = absences.first else { return nil }
+        return "\(Fmt.time(a.start)) → \(Fmt.time(a.end))"
     }
 
     func elapsedRunning(at date: Date) -> TimeInterval {
@@ -207,33 +223,47 @@ final class Store: ObservableObject {
         data.selectedClientID = clientID
         longRunNotified = false
         idleSince = nil
-        idleAway = nil
+        absences = []
         waitingForInput = false
         commit()
     }
 
     /// Arrête le chrono, enregistre la séance tout de suite (l'heure fait foi), puis ouvre le résumé.
+    /// Une absence restée sans réponse est gardée : ce temps reste compté (choix de Théo, 14/11/2026).
     func stop() {
         guard let r = data.running else { return }
-        var s = Session(clientID: r.clientID, start: r.start, end: Date(), excludedSeconds: r.excludedSeconds)
         data.running = nil
-        idleAway = nil
+        absences = []
         idleSince = nil
         longRunNotified = false
-        guard s.duration >= 60 else {
-            // Moins d'une minute : clic par erreur, on n'enregistre rien.
+        // Moins d'une minute : clic par erreur. Moins de 5 min au retour d'une absence retirée : juste
+        // le temps d'arrêter le chrono. Dans les deux cas, rien n'est noté.
+        let minimum: TimeInterval = r.resumedAfterAbsence ? 300 : 60
+        guard let recorded = recordSession(clientID: r.clientID, start: r.start,
+                                           end: Date().addingTimeInterval(-r.excludedSeconds), minimum: minimum) else {
             commit()
             return
         }
-        if data.settings.writeToCalendar, let calID = calendarID(for: s.clientID), let c = client(s.clientID) {
+        beginReview(recorded.session.id)
+        proposeExtension(for: r.clientID, shortfall: recorded.planned - recorded.session.duration)
+    }
+
+    /// Enregistre une séance terminée : son événement d'agenda, dont le bloc donne la durée, et les créneaux
+    /// planifiés qu'elle remplace. Renvoie la séance et la durée planifiée qu'elle couvrait, ou nil si elle
+    /// dure moins que `minimum` (rien n'est alors enregistré).
+    @discardableResult
+    private func recordSession(clientID: UUID, start: Date, end: Date,
+                               minimum: TimeInterval) -> (session: Session, planned: TimeInterval)? {
+        guard end.timeIntervalSince(start) >= minimum else { return nil }
+        var s = Session(clientID: clientID, start: start, end: end)
+        if data.settings.writeToCalendar, let calID = calendarID(for: clientID), let c = client(clientID) {
             s.calendarEventID = calendar.createEvent(title: eventTitle(s, c), start: s.start, end: s.end,
                                                      notes: eventNotes(s), calendarID: calID)
         }
         let planned = replacePlannedSlots(for: s)
         data.sessions.append(s)
         commit()
-        beginReview(s.id)
-        proposeExtension(for: s.clientID, shortfall: planned - s.duration)
+        return (s, planned)
     }
 
     func startFromEvent(_ eventID: String) {
@@ -260,35 +290,71 @@ final class Store: ObservableObject {
 
     // MARK: - Absences
 
+    /// « Retirer ce temps » : la séance est coupée à chaque absence, pour que l'agenda montre les vrais horaires.
+    /// Le travail d'avant devient une séance avec son événement (bandeau « Séance à valider ») et le chrono
+    /// repart au retour. Ex. chrono lancé à 09:00, absence de 12:00 à 13:30 : 09:00-12:00 est noté, le chrono
+    /// continue depuis 13:30.
     func removeIdle() {
-        guard let away = idleAway else { return }
-        if data.running != nil { data.running?.excludedSeconds += away }
-        idleAway = nil
+        guard let r = data.running, !absences.isEmpty else {
+            absences = []
+            onChange?()
+            return
+        }
+        var segmentStart = r.start
+        var legacy = r.excludedSeconds  // ancien temps retiré (0 sur les nouveaux chronos) : ôté du premier bloc
+        for a in absences where a.end > segmentStart {
+            let cut = max(a.start, segmentStart)
+            recordSession(clientID: r.clientID, start: segmentStart, end: cut.addingTimeInterval(-legacy), minimum: 60)
+            legacy = 0
+            segmentStart = a.end
+        }
+        data.running?.start = segmentStart
+        data.running?.excludedSeconds = 0
+        data.running?.resumedAfterAbsence = true
+        absences = []
+        longRunNotified = false
         commit()
     }
 
     func keepIdle() {
-        idleAway = nil
+        absences = []
         onChange?()
     }
 
-    private func registerAway(_ seconds: TimeInterval) {
-        guard data.running != nil, seconds >= 60 else { return }
-        idleAway = (idleAway ?? 0) + seconds
-        notifier?.post(id: "idle", title: "Absent \(Fmt.words(idleAway ?? seconds)) pendant le chrono",
+    /// Note une absence (début et fin exacts) pendant le chrono et demande s'il faut la retirer.
+    private func registerAway(from start: Date, to end: Date) {
+        guard let r = data.running else { return }
+        let from = max(start, r.start)
+        guard end.timeIntervalSince(from) >= 60 else { return }
+        absences = Store.merged(absences + [DateInterval(start: from, end: end)])
+        notifier?.post(id: "idle", title: "Absent \(Fmt.words(idleAway ?? 0)) pendant le chrono",
                        body: "Retirer ce temps de la séance \(currentClientName) ?", category: Notifier.idleCategory)
     }
 
+    /// Absences triées ; celles qui se chevauchent ou se touchent sont fusionnées.
+    private static func merged(_ intervals: [DateInterval]) -> [DateInterval] {
+        var result: [DateInterval] = []
+        for i in intervals.sorted(by: { $0.start < $1.start }) {
+            if let last = result.last, i.start <= last.end {
+                result[result.count - 1] = DateInterval(start: last.start, end: max(last.end, i.end))
+            } else {
+                result.append(i)
+            }
+        }
+        return result
+    }
+
     /// Mac éteint ou en veille pendant le chrono : l'écart depuis le dernier signe de vie devient une absence.
+    /// Si Théo était déjà inactif avant la veille, l'absence commence à sa dernière action.
     private func checkSleepGap() {
         guard let r = data.running else { return }
-        let gap = Date().timeIntervalSince(r.lastSeen)
-        if gap > 300 {
-            registerAway(gap)
+        let now = Date()
+        if now.timeIntervalSince(r.lastSeen) > 300 {
+            registerAway(from: min(idleSince ?? r.lastSeen, r.lastSeen), to: now)
             waitingForInput = true
             idleSince = nil
         }
-        data.running?.lastSeen = Date()
+        data.running?.lastSeen = now
     }
 
     /// Secondes depuis la dernière action au clavier ou à la souris.
@@ -312,7 +378,8 @@ final class Store: ObservableObject {
                     if idle < 30 { waitingForInput = false }
                 } else if let since = idleSince {
                     if idle < 30 {
-                        registerAway(now.timeIntervalSince(since) - idle)
+                        // Retour au clavier : l'absence va de la dernière action avant de partir à la première au retour.
+                        registerAway(from: since, to: now.addingTimeInterval(-idle))
                         idleSince = nil
                     }
                 } else if idle >= Double(data.settings.idleMinutes * 60) {
@@ -538,9 +605,11 @@ final class Store: ObservableObject {
     /// Nombre de jours relus en arrière dans l'agenda.
     private static let syncWindowDays = 180
 
-    /// Reprend les séances notées sur un autre Mac. Tout événement « noté avec Tiroflan » d'un agenda client
-    /// que ce Mac ne connaît pas devient une séance miroir ; un miroir suit son événement (modifié, supprimé).
-    /// Les séances notées sur ce Mac ne sont jamais modifiées ni supprimées ici.
+    /// L'agenda fait foi (choix de Théo, 14/11/2026). Relu chaque minute :
+    /// - séances de ce Mac : elles suivent leur événement (déplacé, raccourci, allongé, renommé, supprimé),
+    ///   voir `followOwnEvents` ;
+    /// - séances d'un autre Mac : tout événement « noté avec Tiroflan » d'un agenda client que ce Mac ne
+    ///   connaît pas devient une séance miroir, qui suit son événement elle aussi.
     func syncFromCalendar() {
         let now = Date()
         guard let from = Calendar.fr.date(byAdding: .day, value: -Store.syncWindowDays, to: now),
@@ -556,7 +625,7 @@ final class Store: ObservableObject {
             guard let clientID = clientForLogged(e, name: parsed.clientName) else { continue }
 
             if let i = data.sessions.firstIndex(where: { $0.calendarEventID == e.id }) {
-                // Déjà connue : un miroir se met à jour, une séance notée ici fait foi.
+                // Déjà connue : un miroir se met à jour ici, une séance de ce Mac dans `followOwnEvents`.
                 guard data.sessions[i].imported else { continue }
                 let mirror = mirrorSession(e, parsed, clientID: clientID, keeping: data.sessions[i])
                 if mirror != data.sessions[i] {
@@ -564,18 +633,28 @@ final class Store: ObservableObject {
                     changed = true
                 }
             } else if let i = data.sessions.firstIndex(where: {
-                $0.clientID == clientID && abs($0.start.timeIntervalSince(e.start)) < 60 && abs($0.end.timeIntervalSince(e.end)) < 60
+                $0.clientID == clientID
+                    && (abs($0.start.timeIntervalSince(e.start)) < 60 || abs($0.end.timeIntervalSince(e.end)) < 60)
+                    && !($0.calendarEventID.map(calendar.eventExists(id:)) ?? false)
             }) {
-                // Même client, mêmes heures : c'est la même séance dont l'événement a changé d'identifiant
-                // (compte retiré puis rajouté). On la rattache, sauf si son événement d'origine existe encore.
-                if let old = data.sessions[i].calendarEventID, calendar.eventExists(id: old) { continue }
+                // Même client, même début ou même fin, et l'événement d'origine de la séance n'existe plus :
+                // c'est le même bloc dont l'identifiant a changé (compte retiré puis rajouté, bloc retouché).
+                // On le rattache ; s'il a bougé, la séance suit juste après.
                 data.sessions[i].calendarEventID = e.id
+                missingPasses[data.sessions[i].id] = nil
+                changed = true
+            } else if let j = data.trash.firstIndex(where: { $0.calendarEventID == e.id }) {
+                // Événement revenu après une disparition passagère (synchro Google) : la séance revient.
+                data.sessions.append(data.trash.remove(at: j))
                 changed = true
             } else {
                 data.sessions.append(mirrorSession(e, parsed, clientID: clientID, keeping: nil))
                 changed = true
             }
         }
+
+        if followOwnEvents(from: from, to: to) { changed = true }
+        if alignLegacyExclusions() { changed = true }
 
         // Miroir dont l'événement a disparu : la séance a été supprimée sur l'autre Mac.
         let before = data.sessions.count
@@ -585,6 +664,110 @@ final class Store: ObservableObject {
         }
         if data.sessions.count != before { changed = true }
         if changed { commit() }
+    }
+
+    /// Séances notées sur ce Mac : leur événement fait foi.
+    /// - Déplacé, raccourci ou allongé (d'une minute ou plus) : la séance prend ses horaires, et la ligne
+    ///   « Tamtam · 2 h 36 · noté avec Tiroflan » de la description est remise à la durée du bloc.
+    /// - Renommé : la séance prend son titre.
+    /// - Supprimé : la séance part dans `trash` (plus comptée, gardée dans data.json). Garde-fous : l'agenda
+    ///   du client doit être lisible, l'absence doit se confirmer à deux relectures d'affilée (une minute),
+    ///   et plus de 3 disparitions d'un coup (compte débranché, synchro Google en cours) ne suppriment rien.
+    private func followOwnEvents(from: Date, to: Date) -> Bool {
+        guard calendar.authorized else { return false }
+        var changed = false
+        var stillMissing: [UUID: Int] = [:]
+        var gone: [UUID] = []
+
+        for i in data.sessions.indices {
+            let s = data.sessions[i]
+            guard !s.imported, let id = s.calendarEventID, s.start >= from, s.start <= to, let c = client(s.clientID) else { continue }
+            guard let e = calendar.loggedEvent(id: id) else {
+                // Introuvable : on ne conclut rien si l'agenda du client n'est pas lisible.
+                guard let calID = calendarID(for: s.clientID), calendar.calendarExists(id: calID) else { continue }
+                let passes = (missingPasses[s.id] ?? 0) + 1
+                stillMissing[s.id] = passes
+                if passes >= 2 { gone.append(s.id) }
+                continue
+            }
+
+            var updated = s
+            let moved = abs(e.start.timeIntervalSince(s.start)) >= 60 || abs(e.end.timeIntervalSince(s.end)) >= 60
+            if moved {
+                updated.start = e.start
+                updated.end = e.end
+                updated.excludedSeconds = 0
+            }
+            let title = e.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty, title != eventTitle(s, c) { updated.title = title }
+            if updated != s {
+                data.sessions[i] = updated
+                changed = true
+            }
+            // Ligne de durée (relue par l'autre Mac) : la durée du bloc, sauf ancienne séance pas encore alignée.
+            if updated.excludedSeconds == 0, let notes = Store.replacingDuration(in: e.notes, with: Fmt.words(updated.duration)),
+               notes != e.notes {
+                calendar.setNotes(id: e.id, notes: notes)
+            }
+        }
+        missingPasses = stillMissing
+
+        guard !gone.isEmpty else {
+            missingAlerted = false
+            return changed
+        }
+        if gone.count > 3 {
+            if !missingAlerted {
+                missingAlerted = true
+                notifier?.post(id: "missing-events", title: "\(gone.count) séances introuvables dans l'agenda",
+                               body: "Rien n'est supprimé dans Tiroflan. Vérifie le compte Google dans Calendrier ; "
+                                   + "si c'est voulu, supprime ces séances depuis l'historique.")
+            }
+            return changed
+        }
+        for id in gone {
+            guard let i = data.sessions.firstIndex(where: { $0.id == id }) else { continue }
+            let s = data.sessions.remove(at: i)
+            data.trash.append(s)
+            missingPasses[id] = nil
+            NSLog("Tiroflan : événement supprimé dans l'agenda, séance \(s.id) (\(s.start) → \(s.end)) mise de côté")
+        }
+        return true
+    }
+
+    /// Anciennes séances (avant le 14/11/2026) dont du temps a été retiré sans toucher l'agenda : leur
+    /// événement finit plus tôt d'autant, pour que l'agenda montre les heures comptées. L'absence n'étant
+    /// pas datée, c'est la fin du bloc qui bouge. Une fois aligné, le temps retiré repasse à 0.
+    /// Validé par Théo le 14/11/2026 (7 séances, 8 h 59 au total sur ce Mac).
+    private func alignLegacyExclusions() -> Bool {
+        var changed = false
+        for i in data.sessions.indices {
+            let s = data.sessions[i]
+            guard !s.imported, s.excludedSeconds >= 1, let id = s.calendarEventID,
+                  let e = calendar.loggedEvent(id: id),
+                  abs(e.start.timeIntervalSince(s.start)) < 60, abs(e.end.timeIntervalSince(s.end)) < 60 else { continue }
+            let newEnd = s.end.addingTimeInterval(-s.excludedSeconds)
+            guard newEnd > s.start, calendar.setEnd(id: id, to: newEnd) else { continue }
+            data.sessions[i].end = newEnd
+            data.sessions[i].excludedSeconds = 0
+            changed = true
+            NSLog("Tiroflan : bloc \(id) raccourci de \(Int(s.excludedSeconds / 60)) min (temps retiré avant le 14/11)")
+        }
+        return changed
+    }
+
+    /// Remet `words` comme durée dans la ligne « Tamtam · 2 h 36 · noté avec Tiroflan » d'une description.
+    /// Seule la durée change : le reste de la description, même retouché dans Google Agenda, est gardé.
+    /// nil si la ligne est introuvable.
+    static func replacingDuration(in notes: String, with words: String) -> String? {
+        let marker = NSRegularExpression.escapedPattern(for: CalendarService.marker)
+        guard let regex = try? NSRegularExpression(pattern: " · ([^·\\n<>]+?) · " + marker) else { return nil }
+        let all = NSRange(notes.startIndex..., in: notes)
+        guard let match = regex.matches(in: notes, range: all).last,
+              let range = Range(match.range(at: 1), in: notes) else { return nil }
+        var result = notes
+        result.replaceSubrange(range, with: words)
+        return result
     }
 
     /// Client d'un événement Tiroflan : le nom écrit dans sa dernière ligne, sinon l'agenda où il se trouve.
@@ -687,6 +870,8 @@ final class Store: ObservableObject {
             s.clientID = clientID
             s.start = start
             s.end = end
+            // Horaires corrigés à la main : le bloc d'agenda donne la durée, plus de temps retiré caché.
+            if moved { s.excludedSeconds = 0 }
             s.title = cleanTitle
             s.note = trimmed
             s.reviewed = true

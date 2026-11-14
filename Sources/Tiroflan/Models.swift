@@ -76,7 +76,8 @@ struct Session: Codable, Identifiable, Hashable {
     var clientID: UUID
     var start: Date
     var end: Date
-    /// Temps retiré (absence détectée, Mac en veille).
+    /// Temps retiré sans que l'agenda le montre (anciennes séances, avant le 14/11/2026). Depuis, retirer
+    /// une absence coupe la séance et ce champ reste à 0 : la durée de la séance est celle de son bloc d'agenda.
     var excludedSeconds: Double
     /// Titre court de la séance (titre de l'événement d'agenda).
     var title: String
@@ -140,15 +141,20 @@ struct ObjectiveRecord: Codable, Hashable {
 struct RunningTimer: Codable {
     var clientID: UUID
     var start: Date
+    /// Ancien fonctionnement (temps retiré sans couper la séance) : reste à 0 sur les nouveaux chronos.
     var excludedSeconds: Double
     /// Dernier signe de vie de l'app, pour détecter une veille ou un arrêt du Mac.
     var lastSeen: Date
+    /// Vrai quand le chrono est reparti au retour d'une absence retirée : un reste de moins de 5 min
+    /// n'est pas noté (c'est juste le temps d'arrêter le chrono).
+    var resumedAfterAbsence: Bool
 
     init(clientID: UUID, start: Date) {
         self.clientID = clientID
         self.start = start
         self.excludedSeconds = 0
         self.lastSeen = start
+        self.resumedAfterAbsence = false
     }
 
     init(from decoder: Decoder) throws {
@@ -157,6 +163,7 @@ struct RunningTimer: Codable {
         start = try c.decode(Date.self, forKey: .start)
         excludedSeconds = try c.decodeIfPresent(Double.self, forKey: .excludedSeconds) ?? 0
         lastSeen = try c.decodeIfPresent(Date.self, forKey: .lastSeen) ?? start
+        resumedAfterAbsence = try c.decodeIfPresent(Bool.self, forKey: .resumedAfterAbsence) ?? false
     }
 }
 
@@ -194,6 +201,9 @@ struct AppData: Codable {
     var running: RunningTimer?
     var selectedClientID: UUID?
     var settings: Preferences
+    /// Séances dont l'événement a été supprimé dans l'agenda : plus comptées, gardées ici en cas d'erreur.
+    /// Une séance revient si son événement réapparaît.
+    var trash: [Session]
 
     /// Données de départ : Tamtam (premier client freelance) et Perso.
     static func initial() -> AppData {
@@ -204,13 +214,14 @@ struct AppData: Codable {
     }
 
     init(clients: [Client], sessions: [Session], objectives: [ObjectiveRecord], running: RunningTimer?,
-         selectedClientID: UUID?, settings: Preferences) {
+         selectedClientID: UUID?, settings: Preferences, trash: [Session] = []) {
         self.clients = clients
         self.sessions = sessions
         self.objectives = objectives
         self.running = running
         self.selectedClientID = selectedClientID
         self.settings = settings
+        self.trash = trash
     }
 
     init(from decoder: Decoder) throws {
@@ -221,6 +232,7 @@ struct AppData: Codable {
         running = try c.decodeIfPresent(RunningTimer.self, forKey: .running)
         selectedClientID = try c.decodeIfPresent(UUID.self, forKey: .selectedClientID)
         settings = try c.decodeIfPresent(Preferences.self, forKey: .settings) ?? Preferences()
+        trash = try c.decodeIfPresent([Session].self, forKey: .trash) ?? []
     }
 }
 
