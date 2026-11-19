@@ -8,6 +8,25 @@ Un chrono par client. Chaque séance terminée devient un événement « noté a
 
 Cette section est écrite pour être suivie pas à pas, par une personne ou par son Claude Code. Les étapes marquées **(à la main)** demandent un mot de passe ou un clic dans une fenêtre système : Claude Code les explique, la personne les fait.
 
+> **Le seul bon dépôt est `theodvd/tiroflan` (privé).** Le dépôt public `YMorice/tiroflan`, et le cask Homebrew « tiroflan » qui en vient, sont une autre app (un minuteur pomodoro en pixel art, `com.yann.tiroflan`) sans rapport avec celle-ci : ne jamais les installer. Si `git clone` répond « Repository not found », c'est que l'invitation GitHub n'est pas encore acceptée : s'arrêter et demander l'accès à Théo, ne pas chercher un autre dépôt.
+
+### 0. Retirer l'app de Yann si elle est installée
+
+```bash
+ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" /Applications/Tiroflan.app/Contents/Info.plist 2>/dev/null)
+echo "${ID:-aucune app Tiroflan}"   # com.yann.tiroflan = l'app de Yann ; com.theodavid.tiroflan = la bonne
+if [ "$ID" = "com.yann.tiroflan" ]; then
+  osascript -e 'quit app id "com.yann.tiroflan"' 2>/dev/null
+  if brew list --cask 2>/dev/null | grep -qx tiroflan; then
+    brew uninstall --cask tiroflan     # sans --zap
+  else
+    rm -rf /Applications/Tiroflan.app
+  fi
+fi
+```
+
+Ne jamais lancer `brew uninstall --zap tiroflan` : il efface tout `~/Library/Application Support/Tiroflan`, où vivent aussi les données de cette app-ci.
+
 ### 1. Prérequis
 
 ```bash
@@ -39,6 +58,8 @@ cd tiroflan
 ```
 
 Un flan apparaît dans la barre des menus. L'app se lance seule à l'ouverture de session (réglable dans ses Réglages).
+
+Contrôle : `/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" /Applications/Tiroflan.app/Contents/Info.plist` doit répondre `com.theodavid.tiroflan`. Le panneau montre un grand chrono, les totaux Auj. / Semaine / Mois et une grille d'activité ; s'il montre une flamme en pixel art, c'est l'app de Yann (retour à l'étape 0).
 
 ### 4. Autorisations (à la main)
 
