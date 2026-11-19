@@ -136,16 +136,20 @@ final class CalendarService: ObservableObject {
         writableCalendars.first { $0.title.localizedCaseInsensitiveCompare(name) == .orderedSame }?.calendarIdentifier
     }
 
-    /// Agenda modifiable dont l'adresse est sur ce domaine (ex. « theo.david@tamtam.ai » pour tamtam.ai).
+    /// Agenda modifiable dont l'adresse est sur ce domaine (ex. « prenom@tamtam.ai » pour tamtam.ai).
+    /// D'abord l'agenda principal du compte branché sur ce Mac (son titre est l'adresse du compte) :
+    /// un agenda de collègue partagé en écriture (ex. collegue@tamtam.ai) ne passe jamais devant.
     func calendarID(forDomain domain: String) -> String? {
         let domain = domain.trimmingCharacters(in: .whitespaces).lowercased()
         guard !domain.isEmpty else { return nil }
-        return writableCalendars.first { $0.title.lowercased().hasSuffix("@" + domain) }?.calendarIdentifier
+        let matches = writableCalendars.filter { $0.title.lowercased().hasSuffix("@" + domain) }
+        let own = matches.first { $0.title.caseInsensitiveCompare($0.source.title) == .orderedSame }
+        return (own ?? matches.first)?.calendarIdentifier
     }
 
     /// Agenda principal d'un compte (Google) : son titre est l'adresse du compte, comme le compte lui-même.
-    /// Écarte les agendas partagés par d'autres (ex. celui de Clémentine), qui portent une autre adresse,
-    /// et les comptes des clients (ex. theo.david@tamtam.ai), pour ne jamais y écrire une séance perso.
+    /// Écarte les agendas partagés par d'autres (ex. celui d'un proche), qui portent une autre adresse,
+    /// et les comptes des clients (ex. prenom@tamtam.ai), pour ne jamais y écrire une séance perso.
     func primaryAccountCalendarID(excludingDomains domains: [String]) -> String? {
         let suffixes = Self.suffixes(domains)
         return writableCalendars.first { cal in
@@ -154,7 +158,7 @@ final class CalendarService: ObservableObject {
         }?.calendarIdentifier
     }
 
-    /// Vrai si l'agenda est celui d'un de ces domaines (ex. theo.david@tamtam.ai pour tamtam.ai).
+    /// Vrai si l'agenda est celui d'un de ces domaines (ex. prenom@tamtam.ai pour tamtam.ai).
     func isCalendar(_ id: String, onDomains domains: [String]) -> Bool {
         guard let title = store.calendar(withIdentifier: id)?.title.lowercased() else { return false }
         return Self.suffixes(domains).contains { title.hasSuffix($0) }

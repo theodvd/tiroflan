@@ -136,7 +136,7 @@ final class Store: ObservableObject {
     }
 
     /// Agenda où écrire les séances d'un client : celui choisi pour lui, sinon l'agenda qui porte son nom
-    /// (ex. « Tamtam » en bleu nuit), sinon celui de son domaine (ex. theo.david@tamtam.ai),
+    /// (ex. « Tamtam » en bleu nuit), sinon celui de son domaine (ex. prenom@tamtam.ai),
     /// sinon l'agenda par défaut des réglages, sinon celui de macOS.
     func calendarID(for clientID: UUID) -> String? {
         client(clientID)?.calendarID ?? automaticCalendarID(for: clientID)
@@ -345,7 +345,7 @@ final class Store: ObservableObject {
     }
 
     /// Mac éteint ou en veille pendant le chrono : l'écart depuis le dernier signe de vie devient une absence.
-    /// Si Théo était déjà inactif avant la veille, l'absence commence à sa dernière action.
+    /// Si la personne était déjà inactive avant la veille, l'absence commence à sa dernière action.
     private func checkSleepGap() {
         guard let r = data.running else { return }
         let now = Date()
@@ -484,7 +484,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Écrit un résumé dans une séance déjà enregistrée, sans écraser ce que Théo a écrit lui-même.
+    /// Écrit un résumé dans une séance déjà enregistrée, sans écraser ce qui a été écrit à la main.
     private func applySummary(_ r: SummaryResult, to id: UUID) {
         guard let i = data.sessions.firstIndex(where: { $0.id == id }), !data.sessions[i].imported,
               data.sessions[i].note.isEmpty, !r.text.isEmpty else { return }
