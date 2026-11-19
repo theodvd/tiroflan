@@ -25,8 +25,10 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Tiroflan écrit tes séances dans ton agenda « Freelance » et affiche tes rendez-vous du jour.</string>
+	<string>Tiroflan écrit tes séances dans ton agenda Google et affiche tes rendez-vous du jour.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Tiroflan demande à Calendrier de recharger ton agenda Google, pour que le décompte de la semaine soit à jour.</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>Tiroflan écrit tes séances dans ton agenda « Freelance » et affiche tes rendez-vous du jour.</string>
+	<string>Tiroflan écrit tes séances dans ton agenda Google et affiche tes rendez-vous du jour.</string>
 </dict>
 </plist>

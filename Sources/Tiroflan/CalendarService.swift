@@ -28,6 +28,56 @@ final class CalendarService: ObservableObject {
 
     var notDetermined: Bool { EKEventStore.authorizationStatus(for: .event) == .notDetermined }
 
+    // MARK: - Synchronisation avec Google
+
+    /// Resynchro en cours (bouton ↻ de l'en-tête).
+    @Published private(set) var syncing = false
+
+    /// Demande légère à macOS de rafraîchir les comptes (Google) s'il juge leurs données anciennes.
+    /// Sans effet visible : appelée à l'ouverture du panneau et toutes les 5 minutes.
+    func refreshSources() {
+        guard authorized else { return }
+        store.refreshSourcesIfNecessary()
+    }
+
+    /// Resynchro complète, pour le bouton : demande à l'app Calendrier de recharger les agendas depuis Google.
+    /// Calendrier n'est jamais ouvert (tout se fait dans Google Agenda) : on le lance en arrière-plan,
+    /// on recharge, puis on le referme. S'il était déjà ouvert, on recharge seulement.
+    func resync() {
+        guard authorized, !syncing else { return }
+        syncing = true
+        store.refreshSourcesIfNecessary()
+        let script = """
+        if application "Calendar" is running then
+            tell application "Calendar" to reload calendars
+            delay 5
+        else
+            tell application "Calendar" to launch
+            delay 1
+            tell application "Calendar" to reload calendars
+            delay 10
+            tell application "Calendar" to quit
+        end if
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        process.terminationHandler = { _ in
+            Task { @MainActor [weak self] in self?.finishResync() }
+        }
+        do {
+            try process.run()
+        } catch {
+            NSLog("Tiroflan : resynchro impossible, \(error)")
+            finishResync()
+        }
+    }
+
+    private func finishResync() {
+        syncing = false
+        reload()
+    }
+
     /// Demande l'accès complet à l'agenda (fenêtre système au premier appel).
     func requestAccess() async {
         do {
@@ -86,16 +136,20 @@ final class CalendarService: ObservableObject {
         writableCalendars.first { $0.title.localizedCaseInsensitiveCompare(name) == .orderedSame }?.calendarIdentifier
     }
 
-    /// Agenda modifiable dont l'adresse est sur ce domaine (ex. « theo.david@tamtam.ai » pour tamtam.ai).
+    /// Agenda modifiable dont l'adresse est sur ce domaine (ex. « prenom@tamtam.ai » pour tamtam.ai).
+    /// D'abord l'agenda principal du compte branché sur ce Mac (son titre est l'adresse du compte) :
+    /// un agenda de collègue partagé en écriture (ex. collegue@tamtam.ai) ne passe jamais devant.
     func calendarID(forDomain domain: String) -> String? {
         let domain = domain.trimmingCharacters(in: .whitespaces).lowercased()
         guard !domain.isEmpty else { return nil }
-        return writableCalendars.first { $0.title.lowercased().hasSuffix("@" + domain) }?.calendarIdentifier
+        let matches = writableCalendars.filter { $0.title.lowercased().hasSuffix("@" + domain) }
+        let own = matches.first { $0.title.caseInsensitiveCompare($0.source.title) == .orderedSame }
+        return (own ?? matches.first)?.calendarIdentifier
     }
 
     /// Agenda principal d'un compte (Google) : son titre est l'adresse du compte, comme le compte lui-même.
-    /// Écarte les agendas partagés par d'autres (ex. celui de Clémentine), qui portent une autre adresse,
-    /// et les comptes des clients (ex. theo.david@tamtam.ai), pour ne jamais y écrire une séance perso.
+    /// Écarte les agendas partagés par d'autres (ex. celui d'un proche), qui portent une autre adresse,
+    /// et les comptes des clients (ex. prenom@tamtam.ai), pour ne jamais y écrire une séance perso.
     func primaryAccountCalendarID(excludingDomains domains: [String]) -> String? {
         let suffixes = Self.suffixes(domains)
         return writableCalendars.first { cal in
@@ -104,7 +158,7 @@ final class CalendarService: ObservableObject {
         }?.calendarIdentifier
     }
 
-    /// Vrai si l'agenda est celui d'un de ces domaines (ex. theo.david@tamtam.ai pour tamtam.ai).
+    /// Vrai si l'agenda est celui d'un de ces domaines (ex. prenom@tamtam.ai pour tamtam.ai).
     func isCalendar(_ id: String, onDomains domains: [String]) -> Bool {
         guard let title = store.calendar(withIdentifier: id)?.title.lowercased() else { return false }
         return Self.suffixes(domains).contains { title.hasSuffix($0) }
@@ -150,6 +204,33 @@ final class CalendarService: ObservableObject {
     /// Vrai si l'événement existe encore (où qu'il soit), pour ne jamais supprimer un miroir par erreur.
     func eventExists(id: String) -> Bool {
         store.event(withIdentifier: id) != nil
+    }
+
+    /// Événement d'une séance lu par son identifiant, où qu'il soit et même si son repère a été effacé.
+    /// nil s'il n'existe plus (ou si l'agenda n'est pas autorisé : à vérifier avant de conclure).
+    func loggedEvent(id: String) -> LoggedEvent? {
+        guard authorized, let e = store.event(withIdentifier: id) else { return nil }
+        return LoggedEvent(id: id, calendarID: e.calendar.calendarIdentifier, title: e.title ?? "",
+                           notes: e.notes ?? "", start: e.startDate, end: e.endDate)
+    }
+
+    /// Vrai si l'agenda est branché et lisible (compte Google présent dans Calendrier).
+    func calendarExists(id: String) -> Bool {
+        authorized && store.calendar(withIdentifier: id) != nil
+    }
+
+    /// Remplace la description d'un événement ; renvoie faux s'il n'existe plus ou n'a pas pu être enregistré.
+    @discardableResult
+    func setNotes(id: String, notes: String) -> Bool {
+        guard authorized, let event = store.event(withIdentifier: id) else { return false }
+        event.notes = notes
+        do {
+            try store.save(event, span: .thisEvent, commit: true)
+            return true
+        } catch {
+            NSLog("Tiroflan : description impossible à mettre à jour, \(error)")
+            return false
+        }
     }
 
     /// Crée l'événement d'une séance ; renvoie son identifiant.
@@ -221,7 +302,23 @@ final class CalendarService: ObservableObject {
         }
     }
 
-    /// Repousse la fin d'un événement ; renvoie faux s'il n'existe plus ou n'a pas pu être enregistré.
+    /// Avance le début d'un événement (la suite d'un créneau après une séance) ; renvoie faux s'il n'existe plus
+    /// ou n'a pas pu être enregistré.
+    func setStart(id: String, to start: Date) -> Bool {
+        guard authorized, let event = store.event(withIdentifier: id), start < event.endDate else { return false }
+        event.startDate = start
+        do {
+            try store.save(event, span: .thisEvent, commit: true)
+            return true
+        } catch {
+            NSLog("Tiroflan : raccourcissement impossible, \(error)")
+            return false
+        }
+    }
+
+    /// Déplace la fin d'un événement (plus tard ou plus tôt) ; renvoie faux s'il n'existe plus
+    /// ou n'a pas pu être enregistré.
+    @discardableResult
     func setEnd(id: String, to end: Date) -> Bool {
         guard authorized, let event = store.event(withIdentifier: id), end > event.startDate else { return false }
         event.endDate = end

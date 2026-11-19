@@ -11,7 +11,7 @@ struct MainView: View {
             banners
             TimerBlock(store: store)
             TotalsRow(store: store)
-            WeekLine(store: store)
+            WeekLine(store: store, calendar: calendar)
             agenda
             activity
             footer
@@ -36,6 +36,10 @@ struct MainView: View {
                     .frame(height: 30)
             }
             Spacer(minLength: 8)
+            IconCircleButton(symbol: calendar.syncing ? "hourglass" : "arrow.clockwise",
+                             label: calendar.syncing ? "Synchronisation avec Google…" : "Resynchroniser l'agenda Google") {
+                calendar.resync()
+            }
             IconCircleButton(symbol: "slider.horizontal.3", label: "Réglages") { store.route = .settings }
         }
     }
@@ -80,9 +84,13 @@ struct MainView: View {
         }
         if let away = store.idleAway {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Absent \(Fmt.words(away)) pendant la séance.")
+                Text("Absent \(Fmt.words(away)) pendant la séance\(store.absenceRange.map { " (\($0))" } ?? "").")
                     .font(.geist(13, .medium))
                     .foregroundStyle(Theme.ink)
+                Text("Retirer coupe la séance à cet endroit, dans l'agenda aussi.")
+                    .font(.geist(12))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Retirer ce temps") { store.removeIdle() }.buttonStyle(CapsuleStyle(kind: .ink, height: 30))
                     Button("Garder") { store.keepIdle() }.buttonStyle(CapsuleStyle(kind: .outline, height: 30))
@@ -252,6 +260,8 @@ struct TotalsRow: View {
 /// Décompte de la semaine du client sélectionné, s'il a un objectif d'heures.
 struct WeekLine: View {
     @ObservedObject var store: Store
+    /// Observé pour recalculer dès que l'agenda change (resynchro, créneau supprimé dans Google).
+    @ObservedObject var calendar: CalendarService
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { ctx in
@@ -261,8 +271,10 @@ struct WeekLine: View {
                         .foregroundStyle(Theme.ink)
                     Text("· \(Fmt.words(b.planned)) planifiées").foregroundStyle(Theme.muted)
                     Spacer(minLength: 4)
-                    Text(b.missing >= 60 ? "\(Fmt.words(b.missing)) à caser" : "semaine couverte")
-                        .foregroundStyle(b.missing >= 60 ? Theme.accent : Theme.muted)
+                    // Écart signé : « +x en trop » si on a planifié plus que l'objectif, « -y à caser » sinon.
+                    Text(b.gap >= 60 ? "+\(Fmt.words(b.gap)) en trop"
+                         : b.gap <= -60 ? "-\(Fmt.words(-b.gap)) à caser" : "semaine pile")
+                        .foregroundStyle(b.gap <= -60 ? Theme.accent : Theme.muted)
                 }
                 .font(.geist(12))
                 .lineLimit(1)
